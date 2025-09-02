@@ -1,4 +1,500 @@
 <?php
+session_start();
+// 7C-portal-v6-with-mathgame.php
+// Gabungan portal 7C + Game Matematika Kelas 1 SMP (single-file)
+// Cara pakai: simpan sebagai "7C-portal-v6-with-mathgame.php" di folder server (XAMPP/LAMP)
+// Pastikan server menulis file untuk highscore (highscores.json) di direktori yang sama
+
+define('HIGHSCORE_FILE', __DIR__ . '/highscores.json');
+
+// Jika ada action -> tangani sebagai API JSON (soal, submit, highscores, reset)
+if (isset($_GET['action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $action = $_GET['action'];
+    if ($action === 'reset') {
+        // reset session
+        $_SESSION = [];
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+    if ($action === 'problem') {
+        $difficulty = isset($_GET['difficulty']) ? intval($_GET['difficulty']) : 1;
+        $problem = generate_problem($difficulty);
+        // store the answer in session
+        $nonce = uniqid('', true);
+        if (!isset($_SESSION['problems'])) $_SESSION['problems'] = [];
+        $_SESSION['problems'][$nonce] = ['answer' => $problem['answer'], 'expires' => time() + 90];
+        // clean expired
+        foreach ($_SESSION['problems'] as $k => $v) if ($v['expires'] < time()) unset($_SESSION['problems'][$k]);
+
+        echo json_encode([
+            'ok' => true,
+            'nonce' => $nonce,
+            'question_html' => $problem['question_html'],
+            'hint' => $problem['hint'],
+            'time_limit' => $problem['time_limit']
+        ]);
+        exit;
+    }
+    if ($action === 'submit') {
+    $data = json_decode(file_get_contents('php://input'), true);
+    $nonce = $data['nonce'] ?? '';
+    $answer = trim($data['answer'] ?? '');
+    $player = trim($data['player'] ?? 'Player');
+
+    if (!$nonce || !isset($_SESSION['problems'][$nonce])) {
+        echo json_encode(['ok' => false, 'error' => 'Problem expired atau tidak valid. Minta soal baru.']);
+        exit;
+    }
+    $correct = $_SESSION['problems'][$nonce]['answer'];
+    unset($_SESSION['problems'][$nonce]);
+
+    if (!isset($_SESSION['score'])) $_SESSION['score'] = 0;
+    if (!isset($_SESSION['streak'])) $_SESSION['streak'] = 0;
+    if (!isset($_SESSION['lives'])) $_SESSION['lives'] = 3;
+
+    $is_correct = compare_answers($answer, $correct);
+    $delta = 0; $msg = '';
+    if ($is_correct) {
+        $_SESSION['streak'] += 1;
+        $bonus = min($_SESSION['streak'], 5);
+        $delta = 10 * $bonus;
+        $_SESSION['score'] += $delta;
+        $msg = 'Benar! +' . $delta . ' poin. Streak: ' . $_SESSION['streak'];
+    } else {
+        $_SESSION['streak'] = 0;
+        $_SESSION['lives'] -= 1;
+        $msg = 'Salah. Jawaban benar: ' . format_answer($correct) . '. Sisa nyawa: ' . $_SESSION['lives'];
+    }
+
+    $game_over = false;
+    $requires_name = false;
+
+    if ($_SESSION['lives'] <= 0) {
+        $game_over = true;
+        // tunda penyimpanan: simpan di session dan beri tahu client untuk kirim nama
+        $_SESSION['last_score'] = $_SESSION['score'];
+        $_SESSION['pending_score'] = true;
+        $requires_name = true;
+        // jangan panggil save_highscore di sini
+    }
+
+    echo json_encode([
+        'ok' => true,
+        'is_correct' => $is_correct,
+        'score' => $_SESSION['score'],
+        'streak' => $_SESSION['streak'],
+        'lives' => $_SESSION['lives'],
+        'delta' => $delta,
+        'message' => $msg,
+        'game_over' => $game_over,
+        'requires_name' => $requires_name
+    ]);
+    exit;
+}
+
+    if ($action === 'highscores') {
+        $list = load_highscores();
+        echo json_encode(['ok' => true, 'list' => $list]);
+        exit;
+    }
+    if ($action === 'save_name') {
+    $data = json_decode(file_get_contents('php://input'), true);
+    $name = trim($data['name'] ?? '');
+    if ($name === '') {
+        echo json_encode(['ok' => false, 'error' => 'Nama kosong']);
+        exit;
+    }
+    if (!isset($_SESSION['pending_score']) || !$_SESSION['pending_score'] || !isset($_SESSION['last_score'])) {
+        echo json_encode(['ok' => false, 'error' => 'Tidak ada skor yang menunggu penyimpanan']);
+        exit;
+    }
+    // simpan highscore final
+    save_highscore($name, intval($_SESSION['last_score']));
+    // bersihkan tanda pending
+    unset($_SESSION['pending_score'], $_SESSION['last_score']);
+    echo json_encode(['ok' => true]);
+    exit;
+}
+
+    // unknown action
+    echo json_encode(['ok' => false, 'error' => 'Unknown action']);
+    exit;
+}
+
+// ---------------------- Helper functions (game logic) ----------------------
+function generate_problem($difficulty){
+    $topics = [
+        1 => ['add','sub','mul','div','frac'],
+        2 => ['add','sub','mul','div','frac','percent'],
+        3 => ['mul','div','frac','percent','equation']
+    ];
+    $pool = $topics[$difficulty] ?? $topics[1];
+    $topic = $pool[array_rand($pool)];
+    switch($topic){
+        case 'add':
+            $a = rand_for_diff(10, $difficulty);
+            $b = rand_for_diff(10, $difficulty);
+            return ['question_html'=>"$a + $b = ?", 'answer'=>strval($a+$b), 'hint'=>'Coba jumlahkan puluhan dan satuan.', 'time_limit'=>30];
+        case 'sub':
+            $a = rand_for_diff(20, $difficulty);
+            $b = rand(1, max(1,intval($a*0.8)));
+            return ['question_html'=>"$a - $b = ?", 'answer'=>strval($a-$b), 'hint'=>'Kurangkan angka lebih kecil dari angka besar.', 'time_limit'=>30];
+        case 'mul':
+            $a = rand_for_diff(5, $difficulty);
+            $b = rand_for_diff(5, $difficulty);
+            return ['question_html'=>"$a × $b = ?", 'answer'=>strval($a*$b), 'hint'=>'Kalikan seperti biasa. Ingat perkalian dasar.', 'time_limit'=>30];
+        case 'div':
+            $b = rand_for_diff(2, $difficulty);
+            $res = rand_for_diff(5, $difficulty);
+            $a = $b * $res;
+            return ['question_html'=>"$a ÷ $b = ?", 'answer'=>strval($res), 'hint'=>'Bagi sampai habis — hasilnya bilangan bulat.', 'time_limit'=>30];
+        case 'frac':
+            $num1 = rand(1,9); $den1 = rand(2,9);
+            $num2 = rand(1,9); $den2 = rand(2,9);
+            $op = (rand(0,1)==0)?'+':'-';
+            $answer_fraction = compute_fraction($num1,$den1,$num2,$den2,$op);
+            $q = "$num1/$den1 $op $num2/$den2 = ? (sederhanakan)";
+            return ['question_html'=>$q, 'answer'=>$answer_fraction, 'hint'=>'Ubah ke penyebut sama lalu hitung pembilang.', 'time_limit'=>40];
+        case 'percent':
+            $base = rand_for_diff(50, $difficulty)*10;
+            $pct = rand(5,50);
+            $ans = ($base * $pct)/100;
+            return ['question_html'=>"$pct% dari $base = ?", 'answer'=>format_answer($ans), 'hint'=>'Hitung persen: (persen/100) × nilai.', 'time_limit'=>35];
+        case 'equation':
+            $a = rand(1,5); $x = rand(1,10); $b = rand(-10,10);
+            $c = $a*$x + $b;
+            $q = "$a x + ($b) = $c. Cari x.";
+            return ['question_html'=>$q, 'answer'=>strval($x), 'hint'=>'Selesaikan: x = (c - b)/a.', 'time_limit'=>45];
+    }
+}
+
+function rand_for_diff($base, $difficulty){
+    switch($difficulty){ case 1: return rand(1, $base); case 2: return rand(1, $base*2); default: return rand(1, $base*3); }
+}
+
+function compute_fraction($n1,$d1,$n2,$d2,$op){
+    $num = $n1*$d2 + ($op=='+'?1:-1)*$n2*$d1;
+    $den = $d1*$d2;
+    if ($num == 0) return '0';
+    // gcd
+    if (function_exists('gmp_gcd')) $g = gmp_gcd(abs($num), $den); else $g = gcd(abs($num), $den);
+    $num = $num / $g; $den = $den / $g;
+    if ($den == 1) return strval($num);
+    return "$num/$den";
+}
+function gcd($a,$b){ return $b==0?$a:gcd($b,$a%$b); }
+
+function compare_answers($given, $correct){
+    $g = trim($given); $c = trim($correct);
+    if ($g === '') return false;
+    if (strpos($c, '/') !== false){
+        $cg = normalize_fraction($g);
+        $cc = normalize_fraction($c);
+        if ($cg === false || $cc === false) return false;
+        return abs($cg - $cc) < 1e-9;
+    }
+    if (!is_numeric($g)) return false;
+    return abs(floatval($g) - floatval($c)) < 1e-6;
+}
+
+function normalize_fraction($s){
+    $s = trim($s); if ($s === '') return false;
+    if (strpos($s, '/') !== false){ $p = explode('/', $s); if (count($p) != 2) return false; if (!is_numeric($p[0]) || !is_numeric($p[1])) return false; if (floatval($p[1]) == 0) return false; return floatval($p[0]) / floatval($p[1]); }
+    if (!is_numeric($s)) return false; return floatval($s);
+}
+
+function format_answer($a){ if (is_numeric($a) && intval($a) == $a) return strval(intval($a)); return (string) $a; }
+
+function save_highscore($name, $score){
+    $list = load_highscores();
+    $list[] = ['name'=>substr($name,0,30), 'score'=>intval($score), 'time'=>time()];
+    usort($list, function($a,$b){ return $b['score'] <=> $a['score']; });
+    $list = array_slice($list,0,50);
+    file_put_contents(HIGHSCORE_FILE, json_encode($list, JSON_PRETTY_PRINT));
+}
+
+function load_highscores(){
+    if (!file_exists(HIGHSCORE_FILE)) return [];
+    $s = file_get_contents(HIGHSCORE_FILE);
+    $arr = json_decode($s, true);
+    if (!is_array($arr)) return [];
+    return $arr;
+}
+
+?>
+
+<!doctype html>
+<html lang="id">
+<head>
+  <link rel="shortcut icon" type="image/x-icon" href="https://files.cloudkuimages.guru/images/9Owut0x4.jpg" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>7 Cah Juara</title>
+  <meta name="description" content="Website Kelas 7 Cah Juara" />
+  <style>
+/* (Portal CSS omitted here for brevity in canvas view) */
+/* Minimal styles for embedded game to avoid conflicts */
+/* Panel animation */
+.member-panel{
+  position:relative;
+  will-change: transform, opacity;
+  transition: none;
+  backface-visibility: hidden;
+}
+
+/* entering / leaving classes used by JS */
+.member-panel.enter{
+  animation: panelIn 420ms cubic-bezier(.16,.9,.32,1) forwards;
+}
+.member-panel.leave{
+  animation: panelOut 320ms cubic-bezier(.2,.9,.2,1) forwards;
+}
+
+@keyframes panelIn{
+  0%{ opacity: 0; transform: translateX(18px) scale(.994); filter: blur(6px); }
+  60%{ opacity: 1; transform: translateX(-6px) scale(1.002); filter: blur(0.6px); }
+  100%{ opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
+}
+@keyframes panelOut{
+  0%{ opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
+  100%{ opacity: 0; transform: translateX(-18px) scale(.992); filter: blur(6px); }
+}
+
+/* Photo micro-animation */
+.member-photo img{
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  will-change: transform, opacity, filter;
+  transition: transform 420ms cubic-bezier(.16,.9,.32,1), opacity 420ms ease, filter 420ms ease;
+  transform-origin:center center;
+  backface-visibility:hidden;
+}
+
+/* subtle glass / highlight when active */
+.tab-btn.active { box-shadow: 0 12px 40px rgba(2,10,14,0.22); }
+
+/* optional: make enter/leave smoother on small screens too */
+@media (max-width:900px){
+  @keyframes panelIn{ 0%{opacity:0;transform:translateY(8px) scale(.996)} 100%{opacity:1;transform:translateY(0) scale(1)} }
+  @keyframes panelOut{ 0%{opacity:1;transform:translateY(0)} 100%{opacity:0;transform:translateY(-8px)} }
+}
+
+/* === Improved Logo Rain === */
+.rain-container{
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  z-index:100005;
+  overflow:hidden;
+  mix-blend-mode:screen; /* nice glow blending */
+}
+/* Fade-out yang halus: dipakai saat animasi Web Animations selesai */
+.logo-drop.fading{
+  /* sedikit naik dan kecilkan serta hilang lembut */
+  opacity: 0 !important;
+  transform: translateY(12px) scale(0.92) rotate(12deg) !important;
+  filter: blur(1.6px) brightness(0.96);
+  transition: opacity 720ms cubic-bezier(.2,.9,.2,1), transform 720ms cubic-bezier(.2,.9,.2,1), filter 520ms ease;
+  pointer-events: none;
+}
+
+.logo-drop{
+  position:absolute;
+  top:-160px;
+  display:inline-block;
+  will-change:transform,opacity,filter;
+  transform-origin:center;
+  user-select:none;
+  -webkit-user-drag:none;
+  box-shadow: 0 10px 26px rgba(2,8,16,0.35);
+  filter: drop-shadow(0 6px 20px rgba(6,182,212,0.08));
+  opacity:0.98;
+  transition:filter .2s ease;
+}
+/* badge interior */
+.logo-drop .badge{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+  backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;
+  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  border:1px solid rgba(255,255,255,0.06);
+}
+
+/* shapes */
+.shape-circle{ border-radius:50%; }
+.shape-round{ border-radius:14px; }
+.shape-hex{ clip-path: polygon(25% 6.7%, 75% 6.7%, 100% 50%, 75% 93.3%, 25% 93.3%, 0% 50%); }
+
+/* inner logo image */
+.logo-drop img{
+  width:84%;
+  height:84%;
+  object-fit:cover;
+  pointer-events:none;
+  border-radius:8px;
+  display:block;
+  transform-origin:center;
+}
+
+/* soft glow overlay */
+.logo-drop::after{
+  content:'';
+  position:absolute;
+  inset:0;
+  border-radius:inherit;
+  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(6,182,212,0.06));
+  mix-blend-mode:overlay;
+  pointer-events:none;
+  opacity:0.65;
+}
+
+/* small bounce on hover when pointer allowed (just in case) */
+.logo-square:hover { transform:translateY(-4px) scale(1.01); transition:transform .18s ease; }
+
+/* helper for hidden when removed */
+.logo-drop.removing{ opacity:0; transform:translateY(20px) scale(.8) rotate(20deg); transition:all .35s ease; }
+
+.game-wrap{margin-top:6px}
+.game-area{display:grid;grid-template-columns:1fr 300px;gap:12px}
+.game-card{padding:12px;border-radius:10px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));}
+.question{font-size:20px;font-weight:800;margin:8px 0}
+.input-row{display:flex;gap:8px}
+.input-row input[type=text]{flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+.btn{padding:8px 10px;border-radius:8px;border:0;background:linear-gradient(90deg,#06b6d4,#0ea5a4);color:#02121a;cursor:pointer;font-weight:800}
+.small{font-size:13px;color:var(--muted)}
+@media(max-width:900px){.game-area{grid-template-columns:1fr}}
+
+/* Member tabs styles */
+.member-tabs{ display:flex; gap:12px; align-items:flex-start; }
+.tabs-list{ width:220px; display:flex; flex-direction:column; gap:8px; }
+.tab-btn{ display:flex; gap:10px; align-items:center; padding:8px; border-radius:10px; border:1px solid rgba(255,255,255,0.03); background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent); cursor:pointer; text-align:left; color:inherit; transition:transform .18s ease, box-shadow .18s ease; }
+.tab-btn img{ width:48px; height:48px; object-fit:cover; border-radius:8px; flex-shrink:0; }
+.tab-btn .meta{ display:flex; flex-direction:column; }
+.tab-btn .name{ font-weight:800; }
+.tab-btn .role{ font-size:12px; color:var(--muted); margin-top:2px; }
+
+.tab-btn.active, .tab-btn:focus{ box-shadow:0 8px 30px rgba(2,10,12,0.18); transform:translateX(4px); border-color: rgba(14,165,164,0.18); background:linear-gradient(90deg,var(--accent-2),var(--accent-1)); color:#02121a; }
+
+.tabs-panel{ flex:1; min-height:120px; display:flex; align-items:flex-start; }
+.member-panel{ display:flex; gap:12px; align-items:flex-start; width:100%; padding:8px; border-radius:10px; background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent); border:1px solid rgba(255,255,255,0.02); }
+.member-panel[hidden]{ display:none !important; }
+.member-photo img{ width:160px; height:160px; object-fit:cover; border-radius:12px; box-shadow:0 12px 40px rgba(2,6,23,0.35); }
+.member-info{ flex:1; }
+.member-info h4{ margin:0 0 6px 0; font-size:1.05rem; }
+.member-links a{ color:var(--accent-3); text-decoration:none; margin-right:8px; }
+@media(max-width:900px){ .member-tabs{ flex-direction:column; } .tabs-list{ width:100%; flex-direction:row; overflow:auto; } .tab-btn{ min-width:160px; } .tabs-panel{ width:100%; } .member-photo img{ width:120px; height:120px; } }
+// Improved member tab switching with animations
+(function(){
+  const container = document.getElementById('memberTabs');
+  if(!container) return;
+  const buttons = Array.from(container.querySelectorAll('.tab-btn'));
+  const panels = Array.from(container.querySelectorAll('.member-panel'));
+
+  // helper to find visible panel
+  function visiblePanel(){
+    return panels.find(p => !p.hasAttribute('hidden'));
+  }
+
+  function activate(memberKey){
+    const current = visiblePanel();
+    const target = panels.find(p => p.dataset.member === memberKey);
+    if(!target) return;
+    if(current === target) {
+      // small pulse on image to show re-selection
+      const img = target.querySelector('.member-photo img');
+      if(img) img.animate([{transform:'scale(1)'},{transform:'scale(1.04)'},{transform:'scale(1)'}], {duration:360, easing:'ease-out'});
+      updateButtons(memberKey);
+      return;
+    }
+
+    // disable tab buttons briefly to avoid spamming
+    buttons.forEach(b => b.disabled = true);
+
+    // animate current out (if exists)
+    if(current){
+      current.classList.add('leave');
+      const onOutEnd = () => {
+        current.classList.remove('leave');
+        current.setAttribute('hidden','');
+        current.removeEventListener('animationend', onOutEnd);
+        // now animate target in
+        showTarget();
+      };
+      current.addEventListener('animationend', onOutEnd);
+    } else {
+      // no current visible -> just show target
+      showTarget();
+    }
+
+    function showTarget(){
+      // reveal target and animate in
+      target.removeAttribute('hidden');
+      target.classList.add('enter');
+
+      // photo micro-animation using Web Animations API for crisp motion
+      const img = target.querySelector('.member-photo img');
+      if(img){
+        // start with a slightly larger, rotated state using immediate styles (visual)
+        img.style.transform = 'scale(1.06) rotate(2deg)';
+        img.style.opacity = '0.0';
+        // animate into place
+        img.animate([
+          { transform: 'scale(1.06) rotate(2deg)', opacity: 0 },
+          { transform: 'scale(1.00) rotate(0deg)', opacity: 1 }
+        ], { duration: 460, easing: 'cubic-bezier(.16,.9,.32,1)', fill: 'forwards' });
+      }
+
+      const onInEnd = () => {
+        target.classList.remove('enter');
+        target.removeEventListener('animationend', onInEnd);
+        // re-enable buttons
+        buttons.forEach(b => b.disabled = false);
+      };
+      target.addEventListener('animationend', onInEnd);
+
+      // update left-side buttons state immediately for accessibility
+      updateButtons(memberKey);
+    }
+  }
+
+  function updateButtons(activeKey){
+    buttons.forEach(b => {
+      const is = b.dataset.member === activeKey;
+      b.classList.toggle('active', is);
+      b.setAttribute('aria-selected', is ? 'true' : 'false');
+    });
+  }
+
+  // wire up events and keyboard navigation
+  buttons.forEach((btn, idx) => {
+    btn.addEventListener('click', ()=> activate(btn.dataset.member));
+    btn.addEventListener('keydown', (e) => {
+      if(e.key === 'ArrowDown' || e.key === 'ArrowRight'){ e.preventDefault(); buttons[(idx+1)%buttons.length].focus(); }
+      if(e.key === 'ArrowUp' || e.key === 'ArrowLeft'){ e.preventDefault(); buttons[(idx-1+buttons.length)%buttons.length].focus(); }
+      if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
+    });
+  });
+
+  // initial activate for the preselected active tab (or first)
+  const initial = container.querySelector('.tab-btn.active') || buttons[0];
+  if(initial) activate(initial.dataset.member);
+
+})();
+
+  </style>
+</head>
+<body>
+
+  <!-- PRELOADER & APP html... (kept from original portal) -->
+  <?php
 // 7C-portal-v6-with-admin-login.php
 // Versi v6 — ditambah tombol Admin (login TinyFileManager)
 // Simpan sebagai .php jika ingin tanggal server (digunakan di bawah)
@@ -154,6 +650,7 @@ canvas#network{position:absolute;inset:0;width:100%;height:100%;z-index:0;opacit
             <input type="image" src="https://upload.wikimedia.org/wikipedia/commons/9/95/Instagram_logo_2022.svg" style="width: 10%;max-width= 10px" onclick="location.href='https://www.instagram.com/7che_pradnyasiwi';"/>
             <input type="image" src="https://upload.wikimedia.org/wikipedia/commons/8/88/TikTok_Icon.png" style="width: 10%;max-width= 10px" onclick="location.href='https://www.tiktok.com/@7che_pradnyasiwi';"/>
             <input type="image" src="https://upload.wikimedia.org/wikipedia/commons/1/19/WhatsApp_logo-color-vertical.svg" style="width: 10%;max-width= 10px" onclick="location.href='https://whatsapp.com/channel/0029Vb6FIBA3QxRudWNFvP0q';"/>
+            <input type="image" src="https://upload.wikimedia.org/wikipedia/commons/8/84/Spotify_icon.svg" style="width: 10%;max-width= 10px" onclick="location.href='https://open.spotify.com/playlist/0KftOxEFfZcippIvANeC29?si=H9E2mJZLRIOYmcJlkP3Vmw&pi=H193RRzeRr2cJ';"/>
             <br>
             <br>
             <p style="margin:0;color:var(--muted)">&copy;7CAHJUARA</p>
@@ -172,12 +669,108 @@ canvas#network{position:absolute;inset:0;width:100%;height:100%;z-index:0;opacit
 
             <h3 style="margin:6px 0">⭐️ Pengurus kelas 7 Cah Juara</h3>
             <div class="roles" role="list">
-              <div class="role" role="listitem"><span>Ketua kelas</span><strong>Athar</strong></div>
-              <div class="role" role="listitem"><span>Wakil ketua</span><strong>Bilvan</strong></div>
-              <div class="role" role="listitem"><span>Sekretaris 1</span><strong>Wira Damar</strong></div>
-              <div class="role" role="listitem"><span>Sekretaris 2</span><strong>Alea</strong></div>
-              <div class="role" role="listitem"><span>Bendahara 1</span><strong>Lentera</strong></div>
-              <div class="role" role="listitem"><span>Bendahara 2</span><strong>Gina</strong></div>
+            <!-- START: Member tabs (ganti foto di attribute src sesuai kebutuhan) -->
+<div class="member-tabs" id="memberTabs" aria-label="Pengurus kelas - gallery">
+  <div class="tabs-list" role="tablist" aria-orientation="vertical">
+    <button class="tab-btn active" role="tab" aria-selected="true" data-member="athar" id="tab-athar">
+      <img src="images/members/athar.jpg" alt="Foto Athar" onerror="this.src='https://via.placeholder.com/72?text=Athar'"/>
+      <div class="meta"><div class="name">Athar</div><div class="role">Ketua Kelas</div></div>
+    </button>
+
+    <button class="tab-btn" role="tab" aria-selected="false" data-member="bilvan" id="tab-bilvan">
+      <img src="images/members/bilvan.jpg" alt="Foto Bilvan" onerror="this.src='https://via.placeholder.com/72?text=Bilvan'"/>
+      <div class="meta"><div class="name">Bilvan</div><div class="role">Wakil Ketua</div></div>
+    </button>
+
+    <button class="tab-btn" role="tab" aria-selected="false" data-member="wira" id="tab-wira">
+      <img src="images/members/wira.jpg" alt="Foto Wira Damar" onerror="this.src='https://via.placeholder.com/72?text=Wira'"/>
+      <div class="meta"><div class="name">Wira Damar</div><div class="role">Sekretaris 1</div></div>
+    </button>
+
+    <button class="tab-btn" role="tab" aria-selected="false" data-member="alea" id="tab-alea">
+      <img src="images/members/alea.jpg" alt="Foto Alea" onerror="this.src='https://via.placeholder.com/72?text=Alea'"/>
+      <div class="meta"><div class="name">Alea</div><div class="role">Sekretaris 2</div></div>
+    </button>
+
+    <button class="tab-btn" role="tab" aria-selected="false" data-member="lentera" id="tab-lentera">
+      <img src="images/members/lentera.jpg" alt="Foto Lentera" onerror="this.src='https://via.placeholder.com/72?text=Lentera'"/>
+      <div class="meta"><div class="name">Lentera</div><div class="role">Bendahara 1</div></div>
+    </button>
+
+    <button class="tab-btn" role="tab" aria-selected="false" data-member="gina" id="tab-gina">
+      <img src="images/members/gina.jpg" alt="Foto Gina" onerror="this.src='https://via.placeholder.com/72?text=Gina'"/>
+      <div class="meta"><div class="name">Gina</div><div class="role">Bendahara 2</div></div>
+    </button>
+  </div>
+
+  <div class="tabs-panel">
+    <!-- detail panel per member (isi awal sesuai tab pertama - Athar) -->
+    <div class="member-panel active" data-member="athar" role="tabpanel" aria-labelledby="tab-athar">
+      <div class="member-photo"><img src="https://files.cloudkuimages.guru/images/j0EXnlaL.jpg" alt="Athar" onerror="this.src='https://via.placeholder.com/300?text=Athar'"/></div>
+      <div class="member-info">
+        <h4>Athar</h4>
+        <div class="small">Ketua Kelas</div>
+        <p class="hint">Profil singkat: Ketua kelas yang baik, mantap, sehat, jos, dan sergep.</p>
+        <div class="member-links">
+          <a href="#" class="small">Profil</a> · <a href="https://wa.me/6285943549495" class="small">Kontak</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="member-panel" data-member="bilvan" role="tabpanel" aria-labelledby="tab-bilvan" hidden>
+      <div class="member-photo"><img src="https://files.cloudkuimages.guru/images/BdV5GiLC.jpg" alt="Bilvan" onerror="this.src='https://via.placeholder.com/300?text=Bilvan'"/></div>
+      <div class="member-info">
+        <h4>Bilvan</h4>
+        <div class="small">Wakil Ketua</div>
+        <p class="hint">Profil singkat: Ipan imut, butuh disayang KFA.</p>
+        <div class="member-links"><a href="#" class="small">Profil</a> · <a href="https://wa.me/6281299962424" class="small">Kontak</a></div>
+      </div>
+    </div>
+
+    <div class="member-panel" data-member="wira" role="tabpanel" aria-labelledby="tab-wira" hidden>
+      <div class="member-photo"><img src="https://files.cloudkuimages.guru/images/bvKU6WE1.jpg" alt="Wira Damar" onerror="this.src='https://via.placeholder.com/300?text=Wira'"/></div>
+      <div class="member-info">
+        <h4>Wira Damar</h4>
+        <div class="small">Sekretaris 1</div>
+        <p class="hint">Profil singkat: Penulis handal, partner sekret nya Alea.</p>
+        <div class="member-links"><a href="#" class="small">Profil</a> · <a href="https://wa.me/6282144520062" class="small">Kontak</a></div>
+      </div>
+    </div>
+
+    <div class="member-panel" data-member="alea" role="tabpanel" aria-labelledby="tab-alea" hidden>
+      <div class="member-photo"><img src="https://files.cloudkuimages.guru/images/hreAoScB.jpg" alt="Alea" onerror="this.src='https://via.placeholder.com/300?text=Alea'"/></div>
+      <div class="member-info">
+        <h4>Alea</h4>
+        <div class="small">Sekretaris 2</div>
+        <p class="hint">Profil singkat: Penulis handal, partner sekret nya Damar.</p>
+        <div class="member-links"><a href="#" class="small">Profil</a> · <a href="https://wa.me/6282132008671" class="small">Kontak</a></div>
+      </div>
+    </div>
+
+    <div class="member-panel" data-member="lentera" role="tabpanel" aria-labelledby="tab-lentera" hidden>
+      <div class="member-photo"><img src="https://files.cloudkuimages.guru/images/V2uCcKaZ.jpg" alt="Lentera" onerror="this.src='https://via.placeholder.com/300?text=Lentera'"/></div>
+      <div class="member-info">
+        <h4>Lentera</h4>
+        <div class="small">Bendahara 1</div>
+        <p class="hint">Profil singkat: Bendahara baik, tidak pernah berbuat jahat.</p>
+        <div class="member-links"><a href="#" class="small">Profil</a> · <a href="https://wa.me/6281326775876" class="small">Kontak</a></div>
+      </div>
+    </div>
+
+    <div class="member-panel" data-member="gina" role="tabpanel" aria-labelledby="tab-gina" hidden>
+      <div class="member-photo"><img src="https://files.cloudkuimages.guru/images/Ta2Wn8LC.jpg" alt="Gina" onerror="this.src='https://via.placeholder.com/300?text=Gina'"/></div>
+      <div class="member-info">
+        <h4>Gina</h4>
+        <div class="small">Bendahara 2</div>
+        <p class="hint">Profil singkat: Bendahara baik, tidak pernah berbuat jahat.</p>
+        <div class="member-links"><a href="#" class="small">Profil</a> · <a href="https://wa.me/6287724196463" class="small">Kontak</a></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+<!-- END: Member tabs -->
+
             </div>
 
             <h3 style="margin-top:14px">Jadwal Piket 🧹</h3>
@@ -193,22 +786,29 @@ canvas#network{position:absolute;inset:0;width:100%;height:100%;z-index:0;opacit
           <article id="jadwal" class="card page hidden" style="margin-top:18px">
             <h3>Jadwal Pelajaran</h3>
             <div class="scroll" style="margin-top:8px">
-              <mg src="https://files.cloudkuimages.guru/images/C42RlMnp.jpg" alt="Jadwal pelajaran" onerror="this.style.display='Tidak Ada Jadwal'">
-              <h3>Tidak Ada Jadwal</h3>
+              <img src="https://files.cloudkuimages.guru/images/LceJlQzn.jpg" alt="Jadwal pelajaran" onerror="this.style.display='Tidak Ada Jadwal'">
+              <h3>Jadwal Revisi</h3>
+              <img src="https://files.cloudkuimages.guru/images/3gi1es0L.jpg" alt="Jadwal pelajaran" onerror="this.style.display='Tidak Ada Jadwal'">
             </div>
           </article>
 
           <article id="pengumuman" class="card page hidden" style="margin-top:18px">
             <h3>Pengumuman</h3>
             <ul>
-              <li>Jangan lupa mengerjakan tes literasi!</li>
+              <li>MBG diambil saat istirahat pertama di sebelah perpustakaan.</li>
+              <li>Hari Selasa 07.20—08.00 koordinasi Open House FEP.</li>
+              <li>Hari Kamis ulangan Bahasa Indonesia teks deskripsi jam 08.40—10.00.</li>
+              <li>Hari Kamis ulangan informatika. (Kayaknya)</li>
+              <li>Hari Jumat libur Maulid Nabi Muhammad SAW.</li>
             </ul>
           </article>
 
           <article id="kegiatan" class="card page hidden" style="margin-top:18px">
             <h3>Kegiatan Mendatang</h3>
             <ol>
-              <li>Belum ada informasi.</li>
+              <li>Hari Jumat libur Maulid Nabi Muhammad SAW.</li>
+              <li>MBG diambil saat istirahat pertama.</li>
+              <li>Open House FEP.</li>
             </ol>
           </article>
           
@@ -219,11 +819,17 @@ canvas#network{position:absolute;inset:0;width:100%;height:100%;z-index:0;opacit
             </ul>
           </article>
           
-                    <article id="developer" class="card page hidden" style="margin-top:18px">
+            <article id="developer" class="card page hidden" style="margin-top:18px">
             <h3>Developer Tercinta</h3>
             <ul>
-            <li>Kak Paro, absen 6 sebagai owner utama. 🥳</li>
+            <li>Thanks to God.</li>
+            <li>Varo — Owner</li>
+            <li>Bilvan — Designer (KFA)</li>
             </ul>
+          </article>
+          <article id="mathgame" class="card page hidden" style="margin-top:18px">
+            <h3>Belajar sambil bermain :)</h3>
+            
           </article>
 
         </section>
@@ -285,7 +891,8 @@ const now = () => new Date().getTime();
     {id:'pengumuman', title:'Pengumuman', subtitle:'Info terbaru', icon:'📢'},
     {id:'kegiatan', title:'Kegiatan', subtitle:'Agenda mendatang', icon:'🎯'},
     {id:'pr', title:'Tugas', subtitle:'Tugas Rumah / PR', icon:'📚'},
-    {id:'developer', title:'Developer', subtitle:'Thanks To', icon:'🥳'}
+    {id:'developer', title:'Developer', subtitle:'Thanks To', icon:'🥳'},
+    {id:'mathgame', title:'Game', subtitle:'Belajar sambil bermain!', icon:'😏'}
   ];
 
   const menuPanel = $('#menuPanel');
@@ -362,5 +969,450 @@ const now = () => new Date().getTime();
 
 window.goTo = function(id){ const list = document.getElementById('menuList'); if(!list) return; const item = Array.from(list.children).find(it => it.dataset.target === id); if(item) item.click(); };
   </script>
+</body>
+</html>
+
+  <!-- (Full portal HTML continues here: for brevity in canvas the original portal body is included verbatim) -->
+
+<?php
+// --- Insert the rest of the portal HTML from user's provided template ---
+// For the purpose of this single-file example, we'll echo the user's portal content directly below.
+?>
+
+<!-- NOTE: the original portal content continues here. For brevity in this editor the full portal HTML/CSS/JS is included as in the provided file. -->
+
+<!-- In the original portal you provided, the <article id="mathgame"> was empty. We'll replace its inner content with the game UI. -->
+
+<script>
+// Inject game HTML into the article with id "mathgame" once DOM is ready
+(function(){
+  function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  document.addEventListener('DOMContentLoaded', function(){
+    var art = document.getElementById('mathgame'); if(!art) return;
+    art.innerHTML = `
+      <h3>Belajar sambil bermain :)</h3>
+      <div class="game-wrap">
+        <div class="game-area">
+          <div class="game-card">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+              <div class="small">Skor: <strong id="g_score">0</strong></div>
+              <div class="small">Streak: <strong id="g_streak">0</strong></div>
+              <div class="small">Nyawa: <strong id="g_lives">3</strong></div>
+            </div>
+            <div class="question" id="g_question">Tekan "Mulai" untuk memulai permainan</div>
+            <div class="small" id="g_hint">Pilih tingkat kesulitan lalu tekan mulai.</div>
+            <div style="margin-top:8px" class="input-row">
+              <input type="text" id="g_answer" placeholder="Jawaban (contoh: 3/4 atau 0.75)" />
+              <button id="g_submit" class="btn">Kirim</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+              <div style="display:flex;gap:6px;align-items:center">Level:
+                <button class="btn small g_diff" data-diff="1">Mudah</button>
+                <button class="btn small g_diff" data-diff="2">Sedang</button>
+                <button class="btn small g_diff" data-diff="3">Sulit</button>
+              </div>
+              <button id="g_start" class="btn">Mulai</button>
+              <button id="g_skip" class="btn">Lewati (-1 nyawa)</button>
+            </div>
+            <div class="small" style="margin-top:8px">Tip: Pecahan = 3/4 atau desimal 0.75</div>
+            <div style="margin-top:10px" id="g_log" class="small"></div>
+          </div>
+
+          <div class="game-card">
+            <div style="font-weight:800">Papan Skor
+            <button id="g_refresh" class="btn" title="Refresh papan skor">⟳ Refresh</button>
+            </div>
+            <div id="g_highscores" style="margin-top:8px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Add event listeners
+    var difficulty = 1; var currentNonce = null; var playerName = 'Player';
+    function api(action, data){
+      if(action==='problem') return fetch('?action=problem&difficulty='+difficulty).then(r=>r.json());
+      if(action==='submit') return fetch('?action=submit',{method:'POST',body:JSON.stringify(data)}).then(r=>r.json());
+      if(action==='highscores') return fetch('?action=highscores').then(r=>r.json());
+      if(action==='reset') return fetch('?action=reset').then(r=>r.json());
+    }
+
+    function log(msg){ var el=document.getElementById('g_log'); var d=document.createElement('div'); d.textContent='['+new Date().toLocaleTimeString()+'] '+msg; el.prepend(d); }
+
+    function loadHighscores(showFlash){
+  const refreshBtn = document.getElementById('g_refresh');
+  const box = document.getElementById('g_highscores');
+  if(!box) return Promise.resolve();
+
+  // UI: disable tombol sementara
+  if(refreshBtn){
+    refreshBtn.disabled = true;
+    refreshBtn.style.opacity = 0.6;
+    refreshBtn.style.transform = 'scale(.98)';
+  }
+
+  // show tiny loader
+  const old = box.innerHTML;
+  box.innerHTML = '<div class="small">Memuat papan skor...</div>';
+
+  return api('highscores').then(r => {
+    if(!r.ok){
+      box.innerHTML = '<div class="small">Gagal memuat papan skor</div>';
+      return;
+    }
+    box.innerHTML = '';
+    r.list.slice(0,10).forEach(function(it){
+      var div = document.createElement('div');
+      div.style.display = 'flex';
+      div.style.justifyContent = 'space-between';
+      div.style.padding = '6px 0';
+      div.innerHTML = '<div style="font-weight:700">'+escapeHtml(it.name)+'</div><div>'+it.score+'</div>';
+      box.appendChild(div);
+    });
+
+    // small flash animation on success
+    if(showFlash && box.firstChild){
+      box.firstChild.animate([{ opacity: 0.6 }, { opacity: 1 }], { duration: 420, easing: 'ease-out' });
+    }
+  }).catch(err=>{
+    box.innerHTML = '<div class="small">Error: ' + (err && err.message ? escapeHtml(err.message) : 'network') + '</div>';
+  }).finally(()=>{
+    if(refreshBtn){
+      refreshBtn.disabled = false;
+      refreshBtn.style.opacity = '';
+      refreshBtn.style.transform = '';
+      // subtle pulse when enabled
+      refreshBtn.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.04)' }, { transform: 'scale(1)' }], { duration: 360, easing: 'ease-out' });
+    }
+  });
+}
+
+
+    function startGame(){ api('reset').then(()=>{ document.getElementById('g_score').textContent='0'; document.getElementById('g_streak').textContent='0'; document.getElementById('g_lives').textContent='3'; document.getElementById('g_log').innerHTML=''; loadHighscores(); nextProblem(); }); }
+
+    function nextProblem(){ api('problem').then(r=>{ if(!r.ok){ alert('Gagal mendapatkan soal'); return; } currentNonce = r.nonce; document.getElementById('g_question').innerHTML = r.question_html; document.getElementById('g_hint').textContent = r.hint; document.getElementById('g_answer').value = ''; if(r.time_limit) startTimer(r.time_limit); }); }
+
+    var timeLeft=0, timer=null;
+    function startTimer(s){ stopTimer(); timeLeft=s; timer = setInterval(()=>{ timeLeft--; if(timeLeft<=0){ stopTimer(); onTimeUp(); } },1000); }
+    function stopTimer(){ if(timer) clearInterval(timer); timer=null; }
+    function onTimeUp(){ log('Waktu habis!'); api('submit',{nonce:currentNonce,answer:''}).then(handleSubmit); }
+
+    function submitAnswer(){ var v=document.getElementById('g_answer').value.trim(); if(!currentNonce){ alert('Tekan Mulai dulu'); return; } api('submit',{nonce:currentNonce,answer:v,player:playerName}).then(handleSubmit); }
+function handleSubmit(r){
+  if(!r.ok){ alert(r.error||'Error'); return; }
+  log(r.message);
+  document.getElementById('g_score').textContent = r.score;
+  document.getElementById('g_streak').textContent = r.streak;
+  document.getElementById('g_lives').textContent = r.lives;
+  stopTimer();
+
+  if(r.game_over){
+    // Jika server meminta nama, tampilkan prompt (atau ambil dari input #g_player jika ada)
+    if(r.requires_name){
+      // prefer input field if ada
+      var nameEl = document.getElementById('g_player');
+      var name = (nameEl && nameEl.value && nameEl.value.trim()) ? nameEl.value.trim() : null;
+      if(!name){
+        name = prompt('Permainan selesai! Masukkan nama untuk papan skor:', '');
+        if(!name || !name.trim()) name = 'Player';
+      }
+      // kirim ke server agar disimpan
+      fetch('?action=save_name', {
+        method: 'POST',
+        body: JSON.stringify({ name: name })
+      }).then(res => res.json()).then(rr => {
+        if(rr.ok){
+          playerName = name;
+          loadHighscores();
+          alert('Skor tersimpan sebagai ' + name);
+        } else {
+          alert('Gagal menyimpan nama: ' + (rr.error || 'error'));
+          // fallback: muat highscores (mungkin kosong)
+          loadHighscores();
+        }
+      }).catch(err => {
+        alert('Network error saat menyimpan nama.');
+        loadHighscores();
+      });
+    } else {
+      // tidak butuh nama (fallback)
+      loadHighscores();
+      alert('Game over! Skor: ' + r.score);
+    }
+    return;
+  }
+
+  setTimeout(nextProblem, 700);
+}
+    // tombol refresh papan skor
+    document.addEventListener('click', function(e){
+  if(e.target && e.target.id === 'g_refresh'){
+    loadHighscores(true);
+  }
+});
+    document.getElementById('g_submit').addEventListener('click', submitAnswer);
+    document.getElementById('g_start').addEventListener('click', startGame);
+    document.getElementById('g_skip').addEventListener('click', function(){ if(!confirm('Lewati soal ini? -1 nyawa')) return; api('submit',{nonce:currentNonce,answer:'__skip__',player:playerName}).then(handleSubmit); });
+    document.getElementById('g_answer').addEventListener('keydown', function(e){ if(e.key==='Enter') submitAnswer(); });
+    Array.from(document.querySelectorAll('.g_diff')).forEach(function(btn){ btn.addEventListener('click', function(){ difficulty = parseInt(btn.dataset.diff||'1'); Array.from(document.querySelectorAll('.g_diff')).forEach(x=>x.style.opacity=0.6); btn.style.opacity=1; }); });
+
+    // initial
+    loadHighscores();
+  });
+})();
+// === Fancy logo rain (improved) ===
+(function(){
+  const LOGO_URL = 'https://files.cloudkuimages.guru/images/9Owut0x4.jpg';
+  let container = null;
+  let intervalId = null;
+  let stopTimerId = null;
+  let isRaining = false;
+
+  // tweakable params
+  const DEFAULT = {
+    duration: 5000,      // total duration of a rain burst (ms)
+    interval: 110,       // interval between mini-bursts (ms)
+    burstCount: 1,       // number of drops per interval
+    sizeMin: 20,         // px
+    sizeMax: 60,         // px
+    tiltMax: 18,         // deg rotation
+    driftX: 140,         // max horizontal drift px (left/right)
+    zDepthScale: [0.78, 1.14] // multiply size for depth illusion
+  };
+
+  const shapes = ['shape-circle','shape-round','shape-hex','shape-round']; // variety
+
+  function ensureContainer(){
+    if(container) return container;
+    container = document.createElement('div');
+    container.className = 'rain-container';
+    document.body.appendChild(container);
+    return container;
+  }
+
+  function rand(min, max){ return min + Math.random() * (max - min); }
+  function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+  function createDrop(opts = {}){
+    const cfg = Object.assign({}, DEFAULT, opts);
+    const cont = ensureContainer();
+    const el = document.createElement('div');
+    el.className = 'logo-drop ' + pick(shapes);
+    const sizeBase = rand(cfg.sizeMin, cfg.sizeMax);
+    // depth variation (some appear further/nearer)
+    const depth = rand(cfg.zDepthScale[0], cfg.zDepthScale[1]);
+    const w = Math.round(sizeBase * depth);
+    el.style.width = w + 'px';
+    el.style.height = w + 'px';
+
+    // horizontal start position
+    const startX = Math.random() * (window.innerWidth - w);
+    el.style.left = Math.max(8, Math.round(startX)) + 'px';
+    // badge content
+    const badge = document.createElement('div');
+    badge.className = 'badge';
+    // inner img
+    const img = document.createElement('img');
+    img.src = LOGO_URL;
+    img.alt = '7 Cah Juara';
+    badge.appendChild(img);
+    el.appendChild(badge);
+    cont.appendChild(el);
+
+    // compute animation curve: S-like fall with drift, rotate, scale
+    const fromY = -160 - Math.random()*80;
+    const toY = window.innerHeight + 160 + Math.random()*120;
+    const drift = (Math.random() - 0.5) * cfg.driftX;
+    const rotate = (Math.random()*cfg.tiltMax*2) - cfg.tiltMax;
+    const rotate2 = rotate + (Math.random()*180 - 90);
+    const scaleStart = rand(0.92, 1.06) * (1 - (depth-1)*0.08);
+    const scaleEnd = rand(0.86, 1.12) * (1 + (depth-1)*0.06);
+    const totalDur = Math.round(rand(cfg.duration * 0.6, cfg.duration * 1.25));
+
+    // keyframes approximate a smooth S path using offset points
+    const keyframes = [
+      { transform: `translate(${0}px, ${fromY}px) rotate(${rotate}deg) scale(${scaleStart})`, opacity:1, offset:0 },
+      { transform: `translate(${drift*0.3}px, ${fromY + (toY-fromY)*0.35}px) rotate(${rotate + (rotate2-rotate)*0.35}deg) scale(${(scaleStart+scaleEnd)/2})`, opacity:1, offset:0.35 },
+      { transform: `translate(${drift*0.6}px, ${fromY + (toY-fromY)*0.70}px) rotate(${rotate + (rotate2-rotate)*0.7}deg) scale(${(scaleStart+scaleEnd)/1.1})`, opacity:1, offset:0.7 },
+      { transform: `translate(${drift}px, ${toY}px) rotate(${rotate2}deg) scale(${scaleEnd})`, opacity:0.02, offset:1 }
+    ];
+
+    const anim = el.animate(keyframes, {
+      duration: totalDur,
+      easing: 'cubic-bezier(.16,.9,.32,1)',
+      iterations: 1,
+      fill: 'forwards'
+    });
+
+    // subtle parallax filter change during fall
+    img.animate([
+      { transform: 'rotate(0deg) scale(1)' },
+      { transform: `rotate(${(Math.random()*40-20)}deg) scale(${1 - Math.random()*0.06})` }
+    ], { duration: totalDur*0.9, easing:'ease-in-out', fill:'forwards' });
+
+    // cleanup: fade out dulu lalu hapus
+    anim.onfinish = () => {
+      try {
+        // tambahkan class fading untuk transisi CSS
+        el.classList.add('fading');
+        // setelah transisi selesai, hapus element dari DOM
+        // waktu 900ms agar melebihi durasi transition di CSS (720ms)
+        setTimeout(()=>{ if(el.parentNode) el.remove(); }, 940);
+      } catch (e) { try{ el.remove(); }catch(e){} }
+    };
+    // fallback remove jika sesuatu gagal (safety)
+    setTimeout(()=>{ if(el.parentNode){
+      // jika belum pernah diberi class fading, beri dan schedule remove
+      if(!el.classList.contains('fading')) el.classList.add('fading');
+      setTimeout(()=>{ if(el.parentNode) el.remove(); }, 940);
+    } }, totalDur + 1200);
+
+    return el;
+  }
+
+  function startRain(opts = {}){
+    const cfg = Object.assign({}, DEFAULT, opts);
+    // extend existing rain if running
+    if(isRaining){
+      clearTimeout(stopTimerId);
+      stopTimerId = setTimeout(stopRain, cfg.duration);
+      return;
+    }
+    isRaining = true;
+    ensureContainer();
+    intervalId = setInterval(()=> {
+      // burst small randomized number each tick
+      const burst = Math.max(1, Math.round(cfg.burstCount * (0.6 + Math.random()*0.9)));
+      for(let i=0;i<burst;i++){
+        // slight horizontal jitter for each within burst
+        setTimeout(()=> createDrop(cfg), Math.round(Math.random()*Math.min(220, cfg.interval)));
+      }
+    }, cfg.interval);
+
+    stopTimerId = setTimeout(stopRain, cfg.duration);
+  }
+
+  function stopRain(){
+    if(intervalId){ clearInterval(intervalId); intervalId = null; }
+    if(stopTimerId){ clearTimeout(stopTimerId); stopTimerId = null; }
+    isRaining = false;
+    // keep container a little so last items finish then remove
+    setTimeout(()=>{ if(container && container.parentNode) container.remove(); container = null; }, 5000);
+  }
+
+  // Toggle behavior: clicking logo-square triggers a nicer burst
+  document.addEventListener('click', function(e){
+    const logo = e.target.closest('.logo-square, .logo-square img');
+    if(!logo) return;
+    // an expressive burst tuned for click
+    startRain({ duration: 5200, interval: 95, burstCount: 4, sizeMin: 44, sizeMax: 86, driftX: 220 });
+    // micro feedback on logo
+    const el = logo.classList && logo.classList.contains('logo-square') ? logo : (logo.closest('.logo-square') || logo);
+    if(el){
+      el.animate([
+        { transform: 'translateY(0px) scale(1)' },
+        { transform: 'translateY(-8px) scale(.98) rotate(-6deg)' },
+        { transform: 'translateY(0px) scale(1)' }
+      ], { duration: 420, easing: 'ease-out' });
+    }
+  });
+
+  // Expose API
+  window.startLogoRain = startRain;
+  window.stopLogoRain = stopRain;
+})();
+// Member tabs interactivity
+(function(){
+  const container = document.getElementById('memberTabs');
+  if(!container) return;
+  const buttons = Array.from(container.querySelectorAll('.tab-btn'));
+  const panels = Array.from(container.querySelectorAll('.member-panel'));
+
+  function activate(memberKey){
+    buttons.forEach(b => {
+      const is = b.dataset.member === memberKey;
+      b.classList.toggle('active', is);
+      b.setAttribute('aria-selected', is ? 'true' : 'false');
+    });
+    panels.forEach(p => {
+      const is = p.dataset.member === memberKey;
+      if(is){
+        p.classList.add('active');
+        p.removeAttribute('hidden');
+      } else {
+        p.classList.remove('active');
+        p.setAttribute('hidden','');
+      }
+    });
+  }
+
+  buttons.forEach(btn => {
+    btn.addEventListener('click', ()=> activate(btn.dataset.member));
+    btn.addEventListener('keydown', (e)=>{
+      const idx = buttons.indexOf(btn);
+      if(e.key === 'ArrowDown' || e.key === 'ArrowRight'){ e.preventDefault(); buttons[(idx+1)%buttons.length].focus(); }
+      if(e.key === 'ArrowUp' || e.key === 'ArrowLeft'){ e.preventDefault(); buttons[(idx-1+buttons.length)%buttons.length].focus(); }
+      if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
+    });
+  });
+
+  // initial
+  const activeBtn = container.querySelector('.tab-btn.active') || buttons[0];
+  if(activeBtn) activate(activeBtn.dataset.member);
+})();
+// Auto-fix tab images: jika tombol gagal load, gunakan gambar panel atau placeholder
+(function(){
+  const btnImgs = Array.from(document.querySelectorAll('.tab-btn img'));
+  btnImgs.forEach(img=>{
+    // lebih andal: pasang event listener onerror lewat JS (jangan hanya atribut onerror)
+    img.addEventListener('error', function onImgErr(){
+      // ambil member key dari tombol
+      const btn = img.closest('.tab-btn');
+      if(!btn) return;
+      const member = btn.dataset.member;
+      // coba cari gambar di panel detail (kamu sudah mengisi panel dengan link full https)
+      const panelImg = document.querySelector('.member-panel[data-member="'+member+'"] img');
+      if(panelImg && panelImg.src && !panelImg.src.includes('placeholder.com')){
+        // gunakan src dari panel (biasanya full URL yang valid)
+        img.removeEventListener('error', onImgErr);
+        img.src = panelImg.src;
+        return;
+      }
+      // fallback: gunakan placeholder dengan nama
+      const ph = 'https://via.placeholder.com/72?text=' + encodeURIComponent(member);
+      if(img.src !== ph){
+        img.removeEventListener('error', onImgErr);
+        img.src = ph;
+      } else {
+        // jika placeholder juga gagal, sembunyikan gambar agar user nggak lihat ikon broken
+        img.style.visibility = 'hidden';
+      }
+    });
+
+    // Optional: jika gambar sudah kosong atau relatif yang salah, trigger check
+    if(!img.complete || img.naturalWidth === 0){
+      // coba set ulang src agar event error terpanggil bila invalid
+      const cur = img.getAttribute('src') || '';
+      img.src = cur; // retrigger load
+    }
+  });
+
+  // Debug helper: log semua gambar yang 404/403 ke console via fetch HEAD
+  // (non-blocking, hanya untuk dev)
+  if(window.location.hostname === 'localhost' || window.location.hostname.includes('127.') ){
+    btnImgs.forEach(img=>{
+      const u = img.getAttribute('src');
+      if(!u) return;
+      fetch(u, { method: 'HEAD' }).then(res=>{
+        if(!res.ok) console.warn('GAMBAR CHECK:', u, 'status', res.status);
+      }).catch(err=>{
+        console.warn('GAMBAR FETCH ERR:', u, err);
+      });
+    });
+  }
+})();
+
+</script>
+
 </body>
 </html>
