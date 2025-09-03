@@ -51,7 +51,11 @@
     <header class="foreground">
       <div class="logo">7C Portal</div>
       <nav>
-        <!-- tombol Admin dan modal TinyFileManager sudah dihapus sesuai permintaan -->
+        <a class="btn" href="#">Home</a>
+        <a class="btn" href="#">Article</a>
+        <a class="btn" href="#">Gallery</a>
+        <a class="btn" href="#">About</a>
+        <a class="btn" href="#">Contact</a>
         <button class="btn" id="btnRefreshAll">Refresh Semua</button>
       </nav>
     </header>
@@ -133,7 +137,7 @@
       </aside>
     </main>
 
-    <footer class="foreground">&copy; 2025 7C Portal — versi HTML tanpa admin</footer>
+    <footer class="foreground">&copy; 2025 7C Portal — versi HTML (TinyFileManager dihapus)</footer>
   </div>
 
   <script>
@@ -338,6 +342,29 @@
       btnSubmit.addEventListener('click', submitAnswer)
       btnSkip.addEventListener('click', skipQuestion)
       btnRefreshAll.addEventListener('click', ()=>{ renderLeaderboard(); alert('Di-refresh!') })
+
+      // Admin button (TinyFileManager removed)
+      const btnAdmin = document.getElementById('btnAdmin')
+      const adminModal = document.getElementById('adminModal')
+      const adminCloseBtn = document.getElementById('adminCloseBtn')
+      const adminLoginBtn = document.getElementById('adminLoginBtn')
+      if(btnAdmin){
+        btnAdmin.addEventListener('click', ()=>{ if(adminModal) adminModal.style.display = 'block' })
+      }
+      if(adminCloseBtn){
+        adminCloseBtn.addEventListener('click', ()=>{ if(adminModal) adminModal.style.display = 'none' })
+      }
+      if(adminLoginBtn){
+        adminLoginBtn.addEventListener('click', ()=>{
+          const u = document.getElementById('adminUser').value
+          const p = document.getElementById('adminPass').value
+          if(u === 'admin' && p === 'admin'){ alert('Login admin sukses (client-side demo).') }
+          else { alert('Kredensial salah atau fitur server-side tidak tersedia. TinyFileManager telah dihapus.') }
+          if(adminModal) adminModal.style.display = 'none'
+        })
+      }
+      // close modal on ESC
+      document.addEventListener('keydown', (e)=>{ if(e.key==='Escape' && adminModal) adminModal.style.display = 'none' })
 
       // Enter to submit
       answerInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ submitAnswer() } })
